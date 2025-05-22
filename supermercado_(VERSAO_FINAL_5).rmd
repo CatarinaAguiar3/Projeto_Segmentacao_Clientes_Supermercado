@@ -1,0 +1,817 @@
+---
+title: "Segmentação de clientes de um supermercado"
+output:
+  rmdformats::robobook:
+    highlight: kate
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1.Introdução
+
+> **Este é o meu primeiro projeto end-to-end, por isso, é o mais simples do meu portifólio.**
+
+O objetivo deste projeto é segmentar os clientes de um supermercado com base em seus perfis de compra, utilizando o algoritmo K-Means e o método do cotovelo. Também será realizada uma análise descritiva dos dados.
+
+Ao final, espera-se obter insights sobre os perfis de clientes e seus padrões de consumo, o que pode ser útil na criação de campanhas de marketing personalizadas.
+
+Os dados utilizados **são reais** e pertencem a um supermercado dos Estados Unidos chamado Hunter’s. A base de dados está disponível no [Kaggle](https://www.kaggle.com/datasets/hunter0007/ecommerce-dataset-for-predictive-marketing-2023) e possui 12 colunas com mais de 2 milhões de registros de compras.
+
+# 2. Tecnologias
+
+Foi utilizado a linguagem R, o Excel e o Power BI
+
+# 3. Carregar pacotes
+
+```{r, message=FALSE, warning=FALSE}
+library(gmodels)
+library(dplyr)
+library(data.table)
+library(tidyr)
+library(ggplot2)
+library(tidyverse)
+library(factoextra)
+library(scales) #escala nos gráficos
+library(corrplot)#Gráfico de correlação
+library(vcd)
+library(cluster)
+
+# Tabela interativa
+library(DT)
+
+# Gráficos interativos
+library(ggplot2)
+library(plotly)
+
+library(htmlwidgets) # Opção 1 - Salvar gráfico em HTML
+library(htmltools)   # Opção 2 - Salvar gráfico em HTML
+
+```
+
+# 4. Carregar a base de dados
+
+```{r}
+dados <- read.csv("C:/0.Projetos/1.Projeto-Supermercado/Dataset/Supermarket_dataset_for_predictive_marketing_2023.csv")
+```
+
+## 4.1 Conhecer os dados
+
+O conjunto de dados têm 2.019.501 linhas e 12 colunas.
+
+Colunas da tabela:
+
+-   order_id – Um número único para identificar o pedido
+
+-   user_id – Um número único para identificar o usuário
+
+-   order_number – Número do pedido
+
+-   order_dow – Dia da semana em que o pedido foi feito
+
+-   order_hour_of_day – Hora do pedido
+
+-   days_since_prior_order – Histórico do pedido
+
+-   product_id – ID do produto
+
+-   add_to_cart_order – Número de itens adicionados ao carrinho
+
+-   reordered – Se o novo pedido ocorreu
+
+-   department_id – Número único atribuído a cada departamento
+
+-   department – ​​Nomes dos departamentos
+
+-   product_name – (Nome dos produtos)
+
+```{r}
+# Primeiras linhas da tabela
+datatable(head(dados))
+```
+
+```{r}
+#Numero de linhas e colunas
+n_linhas <- nrow(dados)
+
+n_colunas <- ncol(dados)
+
+cat("O conjunto de dados tem", n_linhas, "linhas e", n_colunas, "colunas.")
+
+```
+
+```{r}
+#Verificando o formato das colunas
+sapply(dados, class)
+```
+
+# 5.Limpeza dos dados
+
+## 5.1 Verificação de dados nulos
+
+A única coluna com NA´s é days_since_prior_order ( Histórico do pedido).
+
+```{r}
+#Dados Nulos
+porcentagem_nulos <- colSums(is.na(dados))/nrow(dados)*100
+porcentagem_nulos
+```
+
+Observamos abaixo que o histórico de pedidos vai até 30 dias. Então, as NA´s serão retiradas, pois elas correspondem a clientes que não compraram **no período de 30 dias ou clientes novos**.
+
+```{r}
+summary(dados$days_since_prior_order)
+```
+
+## 5.2 Eliminação de NA´s
+
+```{r}
+#Eliminamos as NA
+#Cria-se uma nova base de dados elimando as NA´s
+dados2 <- dados[!is.na(dados$days_since_prior_order), ]
+```
+
+```{r}
+summary(dados2$days_since_prior_order)
+class(dados2$days_since_prior_order)
+```
+
+#### Sobre a variável "days_since_prior_order" :
+
+1\. Observa-se que o número maximo de dias desde a última compra é 30, logo, pode-se supor que essa contagem é mensal.
+
+2\. O mínimo de dias é 0, isso pode indicar novos clientes. E, 25% dos dados têm uma variação de 5 dias entres as compras.
+
+3\. A mediana é 8, isso significa que metade dos clientes tem 8 dias de diferenças entre as compras.
+
+4\. As NA´s podem indicar clientes que não fazem compras a mais de 1 mês.
+
+Após a limpeza dos dados, descobrimos que 105.273 clientes na tabela.
+
+```{r}
+#Saber quantos user id tem na base de dados
+#unique: vai considerar os unicos dados
+user_id_unicos <- unique(dados$user_id)
+#lenght:quantos tem na lista de unique
+n_user_id_unicos <- length(user_id_unicos)
+
+cat("O conjunto de dados tem", n_user_id_unicos, "clientes")
+```
+
+# 6. Transformação dos dados
+
+## 6.1 Tabela com histórico de compras agrupado
+
+Será feito agrupamento dos clientes para encontrar o histórico de compra de cada um.
+
+```{r}
+#Agrupamento de clientes (desconsiderando os novos clientes)
+dados2_grouped <- dados2 %>%
+  group_by(user_id) %>%
+  summarise(max_dias_desde_a_ultima_compra = max(days_since_prior_order))
+```
+
+```{r}
+# Exibir primeiras linhas
+datatable(
+  head(dados2_grouped),
+  options = list(
+    dom = 't',       # Só a tabela
+    pageLength = 5   # Nº de linhas exibidas
+  ),
+  rownames = FALSE   # Remover numeração das linhas
+)
+
+```
+
+## 6.2 Tabela com os departamentos transpostos com colunas
+
+Os departamentos estão inseridos como linha, por isso, será feita suas transposição para que eles sejam considerados colunas e utilizados no clustering.
+
+```{r, message=FALSE, warning=FALSE}
+#Transposta do departamento
+dados2_spread <- dados2 %>%
+  group_by(user_id, department) %>%
+  summarise(count = n()) %>%
+  spread(department, count, fill = 0)
+```
+
+```{r}
+# Exibir primeiras linhas
+datatable(
+  head(dados2_spread),
+  options = list(
+    dom = 't',       # Só a tabela
+    pageLength = 5   # Nº de linhas exibidas
+  ),
+  rownames = FALSE   # Remover numeração das linhas
+)
+
+```
+
+## 6.3 União das tabelas
+
+Agora, as tabelas com os históricos de compra e transposição dos departamentos será unida. Dessa forma, obtemos a tabela final para a segmentação.
+
+```{r}
+#Unir as tabelas  dados2_grouped e dados2_spread
+#Será usada para modelagem
+final_df <- left_join(dados2_grouped, dados2_spread, by = "user_id")
+```
+
+```{r}
+# Exibir primeiras linhas
+datatable(
+  head(final_df),
+  options = list(
+    dom = 't',       # Só a tabela
+    pageLength = 5   # Nº de linhas exibidas
+  ),
+  rownames = FALSE   # Remover numeração das linhas
+)
+```
+
+# 7. Análise Descritiva
+
+## 7.1 Frequência de compra dos clientes
+
+O objetivo é responder a seguinte pergunta: Quantas vezes por mês um cliente costuma ir ao mercado?
+
+Observa-se que a maioria dos clientes realiza compras uma vez por mês (19,93%), seguida por aqueles que compram semanalmente (8,72%).
+
+É possível que o comportamento de compra mensal esteja relacionado ao recebimento de salário, o que leva a compras maiores em um único momento. Essa informação pode ser útil para o supermercado planejar a reposição de mercadorias no início ou no final do mês.
+
+Além disso, há um potencial para o aumento da frequência de compra. Estratégias como programas de fidelidade ou cupons semanais podem incentivar os clientes a retornarem com mais frequência.
+
+### 7.1.1 Tabela com a frequência de compra
+
+```{r}
+#Criar uma tabela de frequencia
+freq_compra <- table(final_df$max_dias_desde_a_ultima_compra)
+#freq_compra
+
+# Converter a tabela de frequência em um dataframe
+freq_compra1 <- as.data.frame(freq_compra)
+#freq_compra1
+
+#Nomear as colunas
+names(freq_compra1) <- c("Quantidade_de_dias_entre_as_compras", "Frequencia")
+#names(freq_compra1)
+
+# Ordenar o dataframe em ordem decrescente
+freq_compra_ordenada <- freq_compra1 %>%
+  arrange(desc(Frequencia)) %>%
+  mutate(
+    Porcentagem_da_freq = round((Frequencia / sum(Frequencia) * 100), 2)
+  )
+
+# Exibir Resultado
+datatable(
+  freq_compra_ordenada,
+  options = list(
+    dom = 't' #,       # Só a tabela
+    #pageLength = 5   # Nº de linhas exibidas
+  ),
+  rownames = FALSE,   # Remover numeração das linhas
+  caption = "Frequência de compra dos clientes"
+)
+```
+
+### 7.1.2 Gráfico Interativo com a frequência de compra
+
+```{r}
+# Alguns clientes compram a cada 7 dias e outros que compram a cada 30 dias
+
+# Gráfico de Frequência das compras
+grafico_freq <- ggplot(final_df, aes(x = max_dias_desde_a_ultima_compra)) +
+  geom_histogram(fill = "#275317", color = "white", bins = 30) +
+  labs(
+    title = "Frequência de Compras dos Clientes",
+    x = "Dias desde a última compra",
+    y = "Número de Clientes"
+  ) +
+  theme_minimal(base_size = 14)
+
+# Tornar o gráfico interativo 
+grafico_freq1 <- ggplotly(grafico_freq) %>%
+  config(displayModeBar = FALSE) %>%  # Desativa a barra de ferramentas superior e o zoom com o scroll
+  layout(
+    xaxis = list(fixedrange = TRUE),  # Desativa o zoom no eixo X
+    yaxis = list(fixedrange = TRUE)   # Desativa o zoom no eixo Y
+  )
+
+grafico_freq1
+
+```
+
+```{r}
+# Opção 1 - Salvar Gráfico
+
+# Salvar o gráfico interativo como um HTML
+saveWidget(grafico_freq1, "C:/0.Projetos/1.Projeto-Supermercado/Projeto_final/Graficos_Interativos/grafico_7.1.html", selfcontained = TRUE)
+
+```
+
+```{r}
+# Opção 2 - Salvar Gráfico
+
+# Salvar o gráfico interativo como um HTML
+# save_html(
+#   browsable(grafico_freq1),  # ou dá para usar: as.tags(grafico_freq1)
+#   file = "C:/0.Projetos/1.Projeto-Supermercado/Projeto_final/Graficos_Interativos/grafico_7.1.html"
+# )
+
+```
+
+## 7.2 Qual dia os clientes costumam ir mais vezes ao supermercado?
+
+Esta pergunta é importante, pois, ajudaria o supermercado a alocar mais funcionários nos dias de maior movimento. Além de melhorar o planejamento do estoque.
+
+De acordo com os dados, Domingo e Segunda-feira são os dias com maior fluxo de clientes. Portanto, é estratégico reforçar a equipe nesses dias e fazer a reposição dos produtos nas prateleiras no sábado.
+
+Como Quarta e Quinta apresentam menor movimento, seria interessante criar ofertas/promoções para atrair mais clientes.
+
+### 7.2.1 Tabela com a quantidade de clientes por dia
+
+```{r}
+# Tabela de frequência
+tabela_frequencia <- table(dados$order_dow)
+
+# Converter para data.frame
+tabela_grafico <- as.data.frame(tabela_frequencia)
+names(tabela_grafico) <- c("Dia_da_compra", "Frequencia")
+
+# Substituir os números pelos nomes dos dias da semana
+dias_semana <- c("Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado")
+
+tabela_grafico$Dia_da_compra <- factor(
+  dias_semana[as.numeric(as.character(tabela_grafico$Dia_da_compra)) + 1],
+  levels = dias_semana  )
+```
+
+```{r}
+# Exibir Resultado
+datatable(
+  tabela_grafico,
+  options = list(
+    dom = 't' #,       # Só a tabela
+    #pageLength = 5   # Nº de linhas exibidas
+  ),
+  rownames = FALSE,   # Remover numeração das linhas
+  caption = "Quantidade de clientes por dia"
+)
+```
+
+### 7.2.2 Gráfico Interativo com a quantidade de clientes por dia
+
+```{r}
+grafico_dias <- ggplot(tabela_grafico, aes(x = Dia_da_compra, y = Frequencia)) +
+  geom_bar(stat = "identity", fill = "#275317") +
+  labs(
+    title = "Dia com mais visitas ao mercado",
+    x = "Dia da compra",
+    y = "Frequência (em milhares)"
+  ) +
+  scale_y_continuous(labels = label_number(scale = 1e-3)) +
+  theme_minimal(base_size = 14)
+
+# Tornar interativo
+grafico_dias1 <- ggplotly(grafico_dias) %>% 
+  config(displayModeBar = FALSE) %>%  # Desativa a barra de ferramentas superior e o zoom com o scroll
+  layout(
+    xaxis = list(fixedrange = TRUE),  # Desativa o zoom no eixo X
+    yaxis = list(fixedrange = TRUE)   # Desativa o zoom no eixo Y
+  )
+
+grafico_dias1 
+```
+
+```{r}
+# Salvar o gráfico interativo como um HTML
+saveWidget(grafico_dias1, "C:/0.Projetos/1.Projeto-Supermercado/Projeto_final/Graficos_Interativos/grafico_7.2.html", selfcontained = TRUE)
+
+```
+
+## 7.3 Departamentos que vendem mais itens
+
+Apesar do dataset não ter o valor dos produtos, saber quais departamentos vendem mais pode ser um indicativo de onde vem a maior parte do lucro do supermercado.
+
+Observa-se que os departametos que mais vende são respectivamente: produce, dairy eggs, snacks.
+
+> **No final deste tópico, traduzi o nome dos departamentos com mais vendas.**
+
+Os departamentos de hortifruit, Ovos e laticínios são os que mais vendem. Esses produtos são utilizados no cotidiano das pessoas, o que indica que este estabelecimento é usado para compras regulares e não apenas emergenciais.
+
+Além disso, esses produtos tem validade curta, logo é importante que o supermercado procure fornecedores próximos ou melhore a logística ao comprar de fornecedores distantes.
+
+Snacks (Lanches, Petiscos e Biscoitos) é o terceiro departamento com mais vendas. Esses alimentos são muito atrativos para crianças, então seria estratégico colocá-los em prateleiras baixas para que as crianças consigam alcançar.
+
+Os departamentos de Frios (ex: queijos) e Padaria também estão entre o top 10 de vendas. Assim, para aumentar o ticket médio, o supermercado poderia oferecer “combos matinais” (leite+queijo+ovos+pão) com preços promocionais nos dias de menor movimento.
+
+### 7.3.1 Contagem de itens, por departamento, comprados por cada cliente
+
+```{r, message=FALSE, warning=FALSE}
+#Tabela que agrupa por departamento e conta os itens que cada cliente compra
+df_grupo <- dados2 %>%
+  group_by(user_id, department) %>%
+  summarise(count = n())
+
+# Exibir Resultado
+datatable(
+  df_grupo,
+  options = list(
+    dom = 't' #,       # Só a tabela
+    #pageLength = 5   # Nº de linhas exibidas
+  ),
+  rownames = FALSE,   # Remover numeração das linhas
+  caption = "Contagem de itens, por departamento, comprados por cada cliente"
+)
+
+```
+
+### 7.3.2 Tabela com o Total de itens vendidos por cada departamento
+
+```{r}
+#Tabela que soma os itens vendidos de cada departamento
+df_sum <- df_grupo %>%
+  group_by(department) %>%
+  summarise(sum_count = sum(count))
+
+# Exibir resultado
+datatable(df_sum,
+          caption = "Total de itens vendidos por cada departamento")
+```
+
+### 7.3.3 Tabela com o Ranking dos 10 departametos que mais vendem
+
+```{r}
+#Tabela que o ranking dos 10 melhores departametos
+df_top10 <- df_sum %>%
+  arrange(desc(sum_count)) %>%
+  head(10)
+
+
+# Exibir Resultado
+datatable(
+  df_top10,
+  options = list(
+    dom = 't' # Só a tabela
+  ),
+  rownames = FALSE,   # Remover numeração das linhas
+  caption = "Ranking dos 10 departametos que mais vendem")
+
+```
+
+### 7.3.4 Gráfico Interativo
+
+```{r}
+# Gráfico com eixos invertidos e visual aprimorado
+grafico_departamentos <- ggplot(df_top10, 
+                                aes(y = reorder(department, sum_count),# Inverter os eixos "x" e "y"
+                                    x = sum_count)) +
+  geom_bar(stat = "identity", fill = "#275317") +
+  labs(
+    title = "Top 10 Departamentos por Quantidade Vendida",
+    x = "Quantidade Vendida (em milhares)",
+    y = "Departamento"
+  ) +
+  scale_x_continuous(labels = label_number(scale = 1e-3)) +
+  theme_minimal(base_size = 13)+
+  theme(plot.title = element_text(size = 15))  # Tamanho do Título 
+
+# Tornar interativo
+grafico_departamentos1 <- ggplotly(grafico_departamentos) %>% 
+  config(displayModeBar = FALSE) %>%  # Desativa a barra de ferramentas superior e o zoom com o scroll
+  layout(
+    xaxis = list(fixedrange = TRUE),  # Desativa o zoom no eixo X
+    yaxis = list(fixedrange = TRUE)   # Desativa o zoom no eixo Y
+  )
+
+grafico_departamentos1
+```
+
+```{r}
+#grafico_interativo <- ggplotly(grafico_departamentos)
+
+# Salvar o gráfico interativo como um HTML
+saveWidget(grafico_departamentos1, "C:/0.Projetos/1.Projeto-Supermercado/Projeto_final/Graficos_Interativos/grafico_7.3.html", selfcontained = TRUE)
+
+
+```
+
+#### Tradução dos departamentos com mais vendas:
+
+| Ranking | Departamento em inglês | Departamento em português |
+|----|----|----|
+| 1 | Produce | Hortifruit |
+| 2 | Dairy Eggs | Laticínios e Ovos |
+| 3 | Snacks | Lanches, Biscoitos e Petiscos |
+| 4 | Bevages | Bebidas (refrigerantes, sucos, cerveja etc.) |
+| 5 | Frozen | Congelados (carnes e legumes congelados, pratos prontos e etc.) |
+| 6 | Pantry | Despensa (itens básicos como arroz, feijão e etc.) |
+| 7 | Bakery | Padaria |
+| 8 | Canned Goods | Enlatados (milho, ervilha, molhos, atum etc.) |
+| 9 | Deli | Rotisseria / Frios ( Embutidos, queijos e etc.) |
+| 10 | Dry Goods & Pasta | Secos e massas |
+
+## 7.4 Horários de maior venda
+
+Os horários de maior venda são entre as 8h e às 17h. É ideal que nestes horários o supermercado coloque mais funcionários no caixas. Também, seria interessante que a reposição de mercadorias ocorresse antes das 8h ou na noite anterior.
+
+Além disso, **seria estratégico que as campanhas de marketing fossem disparadas entre 7h e 9h**. Isso aumentaria o engajamento com os clientes que se preparam para ir às compras.
+
+Caso o supermercado trabalhe com degustação de novos produtos, as amostras poderiam ser exibidas entre 10h e 11h, já que é o horário de maior pico.
+
+Já a limpeza pode ser intensificada às 12h e entre 16h e 17h, períodos de menor circulação dentro do pico — favorecendo a imagem de organização e cuidado.
+
+### 7.4.1 Tabela com os Horários de maior venda
+
+```{r}
+tempo <- dados2 %>% group_by(order_hour_of_day) %>% 
+  summarise(total_produtos_vendidos=sum(add_to_cart_order))
+
+tempo1 <- tempo %>% arrange(desc(total_produtos_vendidos))
+
+
+# Exibir Resultado
+datatable(
+  head(tempo1, 10),
+  options = list(
+    dom = 't' # Só a tabela
+  ),
+  rownames = FALSE,   # Remover numeração das linhas
+  caption = "Horários de maior venda")
+```
+
+### 7.4.2 Gráfico Interativo com os Horários de maior venda
+
+```{r}
+# Gráfico aprimorado
+grafico_horario <- ggplot(tempo1, aes(x = order_hour_of_day, y = total_produtos_vendidos)) +
+  geom_bar(stat = "identity", fill = "#275317") +
+  labs(
+    title = "Distribuição de Vendas por Hora do Dia",
+    x = "Hora do Pedido",
+    y = "Quantidade Vendida (em milhares)"
+  ) +
+  scale_y_continuous(labels = label_number(scale = 1e-3)) +
+  scale_x_continuous(breaks = 0:23) +
+  theme_minimal(base_size = 12)+
+  theme(plot.title = element_text(size = 15))  # Tamanho do Título 
+  
+
+# Tornar interativo
+grafico_horario1  <- ggplotly(grafico_horario) %>% 
+  config(displayModeBar = FALSE) %>%  # Desativa a barra de ferramentas superior e o zoom com o scroll
+  layout(
+    xaxis = list(fixedrange = TRUE),  # Desativa o zoom no eixo X
+    yaxis = list(fixedrange = TRUE)   # Desativa o zoom no eixo Y
+  )
+
+grafico_horario1
+```
+
+```{r}
+# Salvar o gráfico interativo como um HTML
+saveWidget(grafico_horario1, "C:/0.Projetos/1.Projeto-Supermercado/Projeto_final/Graficos_Interativos/grafico_7.4.html", selfcontained = TRUE)
+
+```
+
+## 7.5 Ranking dos produtos mais vendidos do supermercado
+
+Identificar os alimentos mais vendidos é essencial para que o supermercado saiba quais itens precisam ser repostos com maior frequência.
+
+Frutas e vegetais lideram as vendas, seguidos por iogurte, queijo e leite. Uma estratégia eficaz seria criar combos que combinem os produtos mais vendidos com aqueles de menor saída, aumentando o ticket médio e a rotatividade do estoque.
+
+O que esses produtos tem em comum é sua validade curta. Logo, seria interessante o supermercado implementar alertas automáticos para controlar o vencimento e assim reduzir desperdícios.
+
+### 7.5.1 Tabela com o Ranking dos 10 Produtos mais vendidos
+
+```{r, warning=FALSE, message=FALSE}
+#Tabela que agrupa por produto e conta os itens que cada cliente compra
+top_produtos1 <-  dados2 %>%
+  group_by(user_id, product_name) %>%
+  summarise(count = n())
+
+#Tabela que soma os produtos vendidos 
+top_produtos2 <- top_produtos1 %>%
+  group_by(product_name) %>%
+  summarise(total = sum(count))
+
+#Tabela que com o ranking dos 10 produtos mais vendidos
+top_produtos3<- top_produtos2 %>% 
+  arrange(desc(total)) %>%
+  head(10)
+
+# Exibir Resultado
+datatable(
+  top_produtos3,
+  options = list(
+    dom = 't' # Só a tabela
+  ),
+  rownames = FALSE,   # Remover numeração das linhas
+  caption = "Ranking dos 10 Produtos mais vendidos")
+```
+
+### 7.5.2 Gráfico Interativo com o Ranking dos 10 Produtos mais vendidos
+
+```{r}
+#Gráfico com o ranking dos 10 produtos mais vendidos
+#OBS: reorder() organiza "product_name" com base nos valores de "total" em ordem decrescente
+grafico_produtos <- ggplot(top_produtos3, aes(y = reorder(product_name, total), 
+                                              x = total)) +
+  geom_bar(stat = "identity", fill = "#275317") +
+  ggtitle("Ranking dos 10 produtos mais vendidos") +
+  xlab("Produto") +
+  ylab("Quantidade") +
+  theme_minimal(base_size = 13)+
+  theme(plot.title = element_text(size = 15))  # Tamanho do Título 
+
+# Tornar Interativo    
+grafico_produtos1 <- ggplotly(grafico_produtos)%>% 
+  config(displayModeBar = FALSE) %>%  # Desativa a barra de ferramentas superior e o zoom com o scroll
+  layout(
+    xaxis = list(fixedrange = TRUE),  # Desativa o zoom no eixo X
+    yaxis = list(fixedrange = TRUE)   # Desativa o zoom no eixo Y
+  )
+
+grafico_produtos1 
+    
+#produto mais vendido é fresh fruits, seguido de fresh vegetables.
+```
+
+```{r}
+# Salvar o gráfico interativo como um HTML
+saveWidget(grafico_produtos1, "C:/0.Projetos/1.Projeto-Supermercado/Projeto_final/Graficos_Interativos/grafico_7.5.html", selfcontained = TRUE)
+
+```
+
+#### Tradução dos produtos mais vendidos:
+
+| Ranking | Produto em Inglês | Produto em Português |
+|----|----|----|
+| 1 | Fresh Fruits | Frutas Frescas |
+| 2 | Fresh vegetables | Vegetais Frescos |
+| 3 | Packaged vegetables fruits | Frutas e vegetais embalados |
+| 4 | Yogurt | Iogurte |
+| 5 | Packaged cheese | Queijo embalado |
+| 6 | Milk | Leite |
+| 7 | Water seltzer sparkling water | Água com gás / água com sabor |
+| 8 | Chips pretzels | Salgadinhos / pretzels |
+| 9 | Soy lactose free | Produtos sem lactose / à base de soja |
+| 10 | Bread | Pão |
+
+# 8. Modelagem
+
+Nesta parte, será utilizado o algoritmo Kmeans para fazer a clusterização.
+
+## 8.1 Teoria - Método do Cotovelo
+
+O método do Cotovelo (Elbow Method) é uma forma de determinar o número certo de clusters (k). O objetivo dele é encontrar o valor de k que reduz de forma **significativa** a soma da variância (SSE) dentro do cluster.
+
+Aumentar o número de clusters reduz a soma da variância (SSE) dentro do cluster. Isso acontece porque ter mais clusters ajuda a identificar grupos com mais semelhanças entre si. Entretanto, se tivermos muitos clusters, a redução da SEE é muito pequena e insignificante (HAN; PEI; TONG, 2024).
+
+Para descobrir o número ideal de clusters, usamos a análise gráfica.  Por exemplo, vemos na figura abaixo que em k=4, ocorre uma mudança brusca.
+
+![](images/clipboard-4182353808.png)
+
+## 8.2 Amostragem aleatória
+
+Como a base de dados é muito grande, será utilizado uma amostra aleatória para realizar o clustering
+
+```{r}
+#Definir o tamanho da amostra
+sample_size <- 10000
+
+#Amostragem aleatoria
+sampled_dataset <- final_df[sample(nrow(final_df), sample_size), ]
+```
+
+## 8.3 Segmentação teste Kmeans pelo método do cotovelo
+
+Este método tem o intuito de mapear o número de cluster a ser utilizado.
+
+```{r}
+#Tirar a coluna user_id 
+df_numeric <- select_if(sampled_dataset, is.numeric) %>%
+  select(-user_id)
+```
+
+```{r, message=FALSE, warning=FALSE}
+#Semente aleatoria
+set.seed(123)
+#Faz uma segmentação de 1 até 10 clusters
+wss <- map_dbl(1:10, function(k) {
+  kmeans(df_numeric, centers = k, nstart = 10)$tot.withinss
+})
+
+#nstart = 10 numero de interações
+
+```
+
+```{r, warning=FALSE, message=FALSE}
+#Metodo do cotovelo
+fviz_nbclust(df_numeric, kmeans, method = "wss", linecolor =  "#275317") +
+  geom_vline(xintercept = which.min(wss), linetype = 2, color = "#275317") +
+  ggtitle("Método do cotovelo")
+
+```
+
+A segmentação será feita com 5 clusters pois a partir dele a curva fica estável
+
+## 8.4 Padronização
+
+Essa padronização tem como objetivo colocar todas as colunas na mesma escala para em seguida realizar o clustering
+
+```{r}
+media_original <- colMeans(df_numeric, na.rm = TRUE)
+desvio_padrao_original <- apply(df_numeric, 2, sd, na.rm = TRUE)
+#Escalei os numeros da amostra (padronização)
+df_scaled <- scale(df_numeric)
+#OBS: df_scale resultou numa matriz
+```
+
+## 8.5 Clustering
+
+```{r}
+km_result <- kmeans(df_scaled, centers = 5)
+#OBS: km_result originou uma lista
+```
+
+## 8.6 dados padronizados à valores originais
+
+```{r}
+#Estou voltando com os dados originais
+df_original <- scale(df_scaled, center = -media_original/desvio_padrao_original, scale = 1/desvio_padrao_original)
+#OBS: df_original resultou numa matriz.
+#     Logo, para uni-la a uma "km_result" (lista), 
+#     eu precisarei converter os dados para data.frame.
+
+#Converter df_original de "matrix" para "data.frame"
+df_original <- data.frame(df_original)
+
+#Unir "df_original" com "km_result$cluster"
+#Adicionar uma coluna chamada cluster que é o resultado da segmentação anterior
+df_original$cluster <- km_result$cluster
+
+#Salvar a base de dados 
+df_original %>% write.csv("df_original.csv")
+
+```
+
+**Os próximos passos :** gerar uma tabela com os resumos dos dados no Excel e criar um dashboard no Power BI.
+
+# 9. Report
+
+A tabela df_original foi levada para o Excel e após criar uma tabela dinâmica. Foi obtido o seguinte resultado:
+
+![](Imagens/Report/report_tabela_excel.png){width="571"}
+
+Por meio desta tabela, pode-se chegar a algumas conclusões:
+
+**Cluster 1:** ele representa 4 % da amostra, costuma ir ao supermercado, em média , a cada 14 dias. É provável que este grupo seja formado por clientes com crianças. Este grupo compra em grande quantidade, sendo **o maior consumidor de:**
+
+![](Imagens/Report/Cluster_1.png){width="411"}
+
+**Cluster 2:** representa 28% da amostra de clientes. Este grupo constuma ir ao mercadoa cada 27 dias e compra poucos produtos de todos os departamentos. É  provavel que este grupo represente clientes ocasionais.
+
+**Cluster 3:** representa 18 % da amostra e costuma ir ao supermercado a cada 14 dias. Eles consomem na média todos os departamentos. É o **Segundo maior consumidor** de:
+
+![](Imagens/Report/Cluster3.png){width="421"}
+
+**Cluster 4:** representa 46 % da amostra, costuma ir ao supermercado a cada 8 dias e consome poucos produtos de todos os departamentos. É o **Segundo maior consumidor** de [*Alcool*]{.underline}e o **terceiro maior consumidor** de Granel, [*café da manhã*]{.underline} e [*hortfruit*]{.underline}*.* E é o **quarto maior consumidor** de [*ovos e latícionios*]{.underline}.
+
+**Cluster 5:** representa 4 % da amostra e costuma ir ao supermercado a cada 15 dias. É o **maior consumidor** de Alcool, itens de limpeza, produtos de cuidados pessoais e itens para pets. Também é o **Segundo maior consumidor** de bebidas e biscoitos.
+
+Este grupo também consome produtos para bebês que provavelmente são usados nos seus pets.Pode ser que sejam pessoas, em sua maioria, solteiras.
+
+# 10. Insights
+
+-   Cluster 1: enviar ofertas de produtos para bebês, de hortifruit e de biscoitos
+
+-   Cluster 2: uma estratégia interessante seria enviar cupons de descontos para insentivar este cliente a voltar a comprar no supermecado
+
+-   Cluster 3: enviar ofertas de produtos a granel, ovos e latícinios e hortfruit
+
+-   Cluster 4: como este consumidor vai com frequência no mercado, seria interessante enviar as ofertas diárias, principalmente , dos departamentos de Alcool, café da manhã, Hortifruit e ovos e laticínios
+
+-   Cluster 5: enviar ofertas de alcool, itens de limpeza, produtos de cuidados pessoais , itens para pets, bebidas e biscoitos.
+
+-   Com base na combinação da cesta de cosumo dos grupos, podemos tirar os seguintes insights:
+
+-   Colocar o departmento de alcool, próximo do departamento de biscoitos
+
+-   Colocar o departamento de ovos e latícinios próximo do departemnto de hortfruit
+
+# 11. Visualização
+
+O dashboard a seguir foi feito no Power Bi. Ele mostra o ranking dos departamentos mais comprados por cada cluster.
+
+![](Imagens/Report/Visualizacao.png)
+
+# Referências
+
+HAN, J.; PEI, J.; TONG, H. Cluster analysis: basic concepts and methods. Em: **Data Mining**. Elsevier, 2023. p. 379–430.Disponível em: <https://www.sciencedirect.com/science/article/pii/B9780128117606000187> 
+
+RODRIGUES, Francisco. *Algoritmo k-means (k-médias)*. 18 nov. 2021. Disponível em: <https://www.youtube.com/watch?v=njRYKzRKBPY>
